@@ -10,6 +10,7 @@ import json
 import os
 import sys
 import tempfile
+import types
 import unittest
 
 APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -108,6 +109,69 @@ class SettingsTests(unittest.TestCase):
         loaded = app.load_settings()
         self.assertEqual(loaded["wpm"], 80.0)
         self.assertEqual(loaded["mode"], app.DEFAULTS["mode"])
+
+    def test_boolean_spellings_are_understood(self):
+        for text, expected in (
+            ("true", True),
+            (" TRUE ", True),
+            ("yes", True),
+            ("on", True),
+            ("1", True),
+            ("false", False),
+            ("no", False),
+            ("off", False),
+            ("0", False),
+            ("", False),
+        ):
+            with self.subTest(text=text):
+                self.assertIs(app.as_bool(text), expected)
+        self.assertIs(app.as_bool(True), True)
+        self.assertIs(app.as_bool(1), True)
+        self.assertIs(app.as_bool(0), False)
+
+    def test_unreadable_booleans_keep_the_default(self):
+        # "off" must not become True just because it is a non-empty string.
+        self.write({"pacing": "maybe", "topmost": None, "minimize": []})
+        loaded = app.load_settings()
+        self.assertFalse(loaded["pacing"])
+        self.assertTrue(loaded["topmost"])  # default is on
+        self.assertFalse(loaded["minimize"])
+
+    def test_string_booleans_load_as_expected(self):
+        self.write(
+            {
+                "human": "no",
+                "convert_tabs": "1",
+                "minimize": "true",
+                "topmost": "false",
+                "esc_before_enter": "yes",
+                "pacing": "off",
+                "auto_indent_fix": "on",
+            }
+        )
+        loaded = app.load_settings()
+        self.assertFalse(loaded["human"])
+        self.assertTrue(loaded["convert_tabs"])
+        self.assertTrue(loaded["minimize"])
+        self.assertFalse(loaded["topmost"])
+        self.assertTrue(loaded["esc_before_enter"])
+        self.assertFalse(loaded["pacing"])
+        self.assertTrue(loaded["auto_indent_fix"])
+
+    def test_hotkey_getter_degrades_without_win32(self):
+        self.assertIsNone(app.key_state_getter(types.SimpleNamespace()))
+
+        def fake_get_state(_vk):  # pragma: no cover - never called here
+            return 0
+
+        fake_user32 = types.SimpleNamespace(GetAsyncKeyState=fake_get_state)
+        module = types.SimpleNamespace(
+            c_int=int, c_short=int, windll=types.SimpleNamespace(user32=fake_user32)
+        )
+        getter = app.key_state_getter(module)
+        self.assertIs(getter, fake_get_state)
+        self.assertEqual(getter.argtypes, (int,))
+        self.assertIs(getter.restype, int)
 
 
 if __name__ == "__main__":

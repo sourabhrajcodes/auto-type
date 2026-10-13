@@ -6,6 +6,7 @@ Run with:  py -m unittest discover -s tests -v
 
 from __future__ import annotations
 
+import gc
 import importlib.util
 import os
 import sys
@@ -39,13 +40,21 @@ def make_app(test_case, save_on_close: bool = False):
 
     def cleanup():
         try:
-            app.on_close()  # the app's real shutdown path
+            app.on_close()  # the app's real shutdown path (destroys the root)
         except Exception:
             pass
         try:
             root.destroy()
         except tk.TclError:
             pass
+        # Drop every Tk object this test built and collect it right here, on the
+        # main thread while the interpreter is still alive. Collecting them later
+        # (say, during another test) makes tkinter's __del__ run against an
+        # already-destroyed Tcl interpreter: that prints RuntimeError noise and
+        # can abort the whole run with "Tcl_AsyncDelete: async handler deleted by
+        # the wrong thread".
+        app.__dict__.clear()
+        gc.collect()
 
     test_case.addCleanup(cleanup)
     return app
@@ -288,6 +297,64 @@ class UiFlowTests(unittest.TestCase):
         params["human"] = False
         slow = engine_module.plan_duration(engine_module.build_plan(app._normalized_text(), **params))
         self.assertGreater(slow, fast)
+
+    def test_progress_highlight_is_exact_with_an_emoji(self):
+        # Tk's "+ N chars" arithmetic counts code points, like Python, so the
+        # plan's offsets are used as they are. (The *string form* of a Tk index is
+        # a UTF-16 offset, which makes an emoji look like two units - a trap an
+        # earlier version of this code fell into.)
+        text = "a\U0001F600bcdefghij"  # 12 Python characters
+        app = make_app(self)
+        app.text.delete("1.0", "end")
+        app.text.insert("1.0", text)
+        app.run_text = text
+        app.plan_total = len(text)
+        app.typed_total = 0
+        app.shown_upto = 0
+        app.highlight_ok = True
+        app.state = "typing"
+
+        app.events.put(("progress", 9, None))
+        pump(app, rounds=1)
+
+        typed_range = app.text.tag_ranges("typed")
+        self.assertEqual(app.text.get(*typed_range), text[:9])
+        head_range = app.text.tag_ranges("head")
+        self.assertEqual(app.text.get(*head_range), text[8:9])
+
+    def test_minimum_window_size_fits_every_row(self):
+        # Tk clips packed widgets once the window is smaller than their natural
+        # size, which is how option labels and the status area used to vanish at
+        # the old hard-coded 660x560 minimum.
+        app = make_app(self)
+        app.root.update_idletasks()
+        min_width, min_height = app.root.minsize()
+
+        def walk(widget):
+            yield widget
+            for child in widget.winfo_children():
+                yield from walk(child)
+
+        def padx(widget) -> int:
+            raw = widget.pack_info().get("padx", 0)
+            if isinstance(raw, tuple):
+                return sum(int(value) for value in raw)
+            return sum(int(float(part)) for part in str(raw).split())
+
+        for parent in walk(app.root):
+            side_by_side = [
+                child
+                for child in parent.winfo_children()
+                if child.winfo_manager() == "pack"
+                and str(child.pack_info().get("side", "top")) in ("left", "right")
+            ]
+            row_width = sum(child.winfo_reqwidth() + padx(child) for child in side_by_side)
+            with self.subTest(parent=str(parent)):
+                self.assertLessEqual(row_width, min_width)
+
+        # Everything except the text box must fit in the minimum height.
+        fixed_height = app.root.winfo_reqheight() - app.text_frame.winfo_reqheight()
+        self.assertGreaterEqual(min_height, fixed_height)
 
     def test_events_with_missing_fields_do_not_break_the_poller(self):
         app = make_app(self)

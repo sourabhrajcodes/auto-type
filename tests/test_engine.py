@@ -189,6 +189,73 @@ class RunPlanTests(unittest.TestCase):
         self.assertEqual(seen, [1, 2, 3])
 
 
+class StopLatencyTests(unittest.TestCase):
+    def test_wait_interruptibly_slices_only_when_a_stop_callback_exists(self):
+        calls = []
+        self.assertTrue(engine.wait_interruptibly(calls.append, 0.05))
+        self.assertEqual(calls, [0.05])  # one exact sleep, nothing sliced
+
+        calls.clear()
+        stopped = {"now": False}
+        self.assertTrue(engine.wait_interruptibly(calls.append, 0.05, lambda: stopped["now"]))
+        self.assertAlmostEqual(sum(calls), 0.05, places=9)
+        self.assertGreater(len(calls), 1)  # long waits are sliced for polling
+
+        calls.clear()
+        stopped["now"] = True
+        self.assertFalse(engine.wait_interruptibly(calls.append, 0.5, lambda: stopped["now"]))
+        self.assertEqual(calls, [])  # already stopping: sleeps nothing more
+
+    def test_stop_is_honoured_inside_a_long_pause(self):
+        # At 10 wpm a single pause lasts over a second. F8 must not wait for the
+        # pause to finish playing out.
+        plan = engine.build_plan("print('hello world.')\nx = 1", wpm=10, mode="char", human=False)
+        keyboard = FakeKeyboard()
+        clock = VirtualClock()
+        pressed_at = []
+
+        def sleep(seconds):
+            if not pressed_at and clock.now >= 0.5:  # the key press lands mid-pause
+                pressed_at.append(clock.now)
+            clock.now += seconds
+
+        typed = engine.run_plan(
+            keyboard, plan, should_stop=lambda: bool(pressed_at), sleep=sleep
+        )
+        self.assertTrue(pressed_at, "this plan should contain a pause longer than 0.5 s")
+        self.assertGreater(typed, 0)
+        self.assertLessEqual(clock.now - pressed_at[0], engine.STOP_POLL_SLICE + 1e-9)
+
+    def test_no_stop_callback_keeps_the_planned_duration(self):
+        plan = engine.build_plan("hello world.", wpm=10, mode="char", human=False)
+        clock = VirtualClock()
+        engine.run_plan(FakeKeyboard(), plan, sleep=clock)
+        self.assertAlmostEqual(clock.now, engine.plan_duration(plan), places=9)
+
+
+class ResumePropertyTests(unittest.TestCase):
+    def test_stopping_and_resuming_at_every_character_reproduces_the_text(self):
+        text = "def f(a):\n    return a + 1  # ok\n\nprint(f('x'))\n"
+        plan = engine.build_plan(
+            text, wpm=engine.MAX_WPM, mode="word", human=True, rng=random.Random(99)
+        )
+        for split in range(len(text) + 1):
+            with self.subTest(split=split):
+                first = FakeKeyboard()
+                typed = engine.run_plan(
+                    first,
+                    plan,
+                    should_stop=lambda: len(first.typed) >= split,
+                    sleep=lambda _seconds: None,
+                )
+                self.assertEqual(typed, split)
+                self.assertEqual("".join(first.typed), text[:split])
+
+                rest = FakeKeyboard()
+                engine.run_plan(rest, engine.trim_plan(plan, typed), sleep=lambda _s: None)
+                self.assertEqual("".join(rest.typed), text[split:])
+
+
 class TrimPlanTests(unittest.TestCase):
     def test_trim_removes_exactly_n_characters(self):
         for mode in ("word", "char"):

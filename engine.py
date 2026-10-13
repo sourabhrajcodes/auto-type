@@ -27,6 +27,7 @@ __all__ = [
     "run_plan",
     "plan_duration",
     "trim_plan",
+    "wait_interruptibly",
     "base_char_delay",
     "WindowsKeyboard",
     "InjectionError",
@@ -35,6 +36,7 @@ __all__ = [
     "NEWLINE_ESC_ENTER",
     "COMPAT_MIN_GAP",
     "COMPAT_NEWLINE_PAUSE",
+    "STOP_POLL_SLICE",
 ]
 
 IS_WINDOWS = os.name == "nt"
@@ -57,6 +59,9 @@ COMPAT_MIN_GAP = 0.025
 start dropping or reordering input when keystrokes arrive faster than that)."""
 COMPAT_NEWLINE_PAUSE = 0.12
 """Breathing room after each line break when compatibility pacing is on."""
+
+STOP_POLL_SLICE = 0.02
+"""Longest a stop request can wait while the engine is pausing (seconds)."""
 
 
 @dataclass(frozen=True)
@@ -172,6 +177,34 @@ def trim_plan(plan: Sequence[Stroke], skip: int) -> List[Stroke]:
     return trimmed
 
 
+def wait_interruptibly(
+    sleep: Callable[[float], None],
+    seconds: float,
+    should_stop: Optional[Callable[[], bool]] = None,
+) -> bool:
+    """Sleep, but come back early when a stop is requested. False = stop now.
+
+    A single ``time.sleep`` of a slow mode's pause (up to a couple of seconds at
+    10 wpm) would otherwise sit between the user's F8 press and the stop, which
+    is exactly the delay this avoids. Waits are sliced into ``STOP_POLL_SLICE``
+    chunks only when a stop callback exists, so plans without one (tests,
+    estimates) keep their single exact sleep.
+    """
+    if seconds <= 0:
+        return should_stop is None or not should_stop()
+    if should_stop is None:
+        sleep(seconds)
+        return True
+    remaining = seconds
+    while remaining > 1e-9:
+        if should_stop():
+            return False
+        step = min(STOP_POLL_SLICE, remaining)
+        sleep(step)
+        remaining -= step
+    return not should_stop()
+
+
 def run_plan(
     keyboard: "WindowsKeyboard",
     plan: Sequence[Stroke],
@@ -181,8 +214,10 @@ def run_plan(
 ) -> int:
     """Type the plan. Returns how many characters were actually typed.
 
-    ``should_stop`` is polled before every character so a stop request is
-    honoured almost instantly (worst case: one character in word mode).
+    ``should_stop`` is polled before every character and at least every
+    ``STOP_POLL_SLICE`` seconds inside a pause, so a stop is honoured within a
+    few tens of milliseconds at any speed - including during the long pauses of
+    slow and human-like modes.
     """
     typed = 0
     for stroke in plan:
@@ -196,11 +231,13 @@ def run_plan(
                 on_char(typed)
             # No intra delay after the final character: the stroke's post delay takes over.
             if stroke.intra_delay > 0 and index < last_index:
-                sleep(stroke.intra_delay)
+                if not wait_interruptibly(sleep, stroke.intra_delay, should_stop):
+                    return typed
         if should_stop is not None and should_stop():
             return typed
         if stroke.post_delay > 0:
-            sleep(stroke.post_delay)
+            if not wait_interruptibly(sleep, stroke.post_delay, should_stop):
+                return typed
     return typed
 
 

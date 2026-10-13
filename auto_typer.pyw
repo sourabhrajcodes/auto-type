@@ -57,6 +57,50 @@ DEFAULTS = {
 
 VK_F8 = 0x77
 HOTKEY_POLL_SECONDS = 0.04
+TEXT_BOX_MIN_HEIGHT = 90
+"""Smallest useful height for the text box; the window minimum leaves this much."""
+
+# Setting keys that hold a yes/no value.
+BOOL_KEYS = (
+    "human",
+    "convert_tabs",
+    "minimize",
+    "topmost",
+    "esc_before_enter",
+    "pacing",
+    "auto_indent_fix",
+)
+
+
+def as_bool(value, default: bool = False) -> bool:
+    """A yes/no setting, from JSON booleans, 0/1, or "true"/"false" text.
+
+    The settings file is user-writable, and ``bool("false")`` is ``True`` in
+    Python - a hand-edited file must not be able to flip an option on by
+    writing "false". Anything unreadable keeps the default.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in ("1", "true", "yes", "on"):
+            return True
+        if text in ("0", "false", "no", "off", ""):
+            return False
+    return default
+
+
+def key_state_getter(ctypes_module):
+    """``GetAsyncKeyState`` wrapper, or ``None`` where Win32 user32 is missing."""
+    windll = getattr(ctypes_module, "windll", None)
+    if windll is None:  # not Windows: the hotkey watcher simply never fires
+        return None
+    get_state = windll.user32.GetAsyncKeyState
+    get_state.argtypes = (ctypes_module.c_int,)
+    get_state.restype = ctypes_module.c_short
+    return get_state
 
 
 def load_settings() -> dict:
@@ -85,16 +129,8 @@ def load_settings() -> dict:
         data["tab_spaces"] = max(1, min(8, int(data["tab_spaces"])))
     except (TypeError, ValueError):
         data["tab_spaces"] = DEFAULTS["tab_spaces"]
-    for key in (
-        "human",
-        "convert_tabs",
-        "minimize",
-        "topmost",
-        "esc_before_enter",
-        "pacing",
-        "auto_indent_fix",
-    ):
-        data[key] = bool(data[key])
+    for key in BOOL_KEYS:
+        data[key] = as_bool(data[key], bool(DEFAULTS[key]))
     if not isinstance(data["text"], str):
         data["text"] = ""
     return data
@@ -118,9 +154,7 @@ class HotkeyWatcher(threading.Thread):
         super().__init__(daemon=True)
         import ctypes
 
-        self._get_state = ctypes.windll.user32.GetAsyncKeyState
-        self._get_state.argtypes = (ctypes.c_int,)
-        self._get_state.restype = ctypes.c_short
+        self._get_state = key_state_getter(ctypes)
         self._vk = vk
         self._on_press = on_press
         self._stop = threading.Event()
@@ -129,6 +163,8 @@ class HotkeyWatcher(threading.Thread):
         self._stop.set()
 
     def run(self) -> None:
+        if self._get_state is None:  # no Win32 keyboard state to watch
+            return
         was_down = False
         while not self._stop.wait(HOTKEY_POLL_SECONDS):
             is_down = bool(self._get_state(self._vk) & 0x8000)
@@ -172,6 +208,7 @@ class AutoTyperApp:
 
         self._build_widgets()
         self._apply_settings_to_widgets()
+        self._fit_minimum_size()
         self.hotkey.start()
 
         self.events.put(("idle", 0, None))
@@ -194,10 +231,15 @@ class AutoTyperApp:
             darkcolor=ACCENT,
         )
 
-        pad = {"padx": 14, "pady": (0, 0)}
+        # Row 1 is the text box and the only row with weight, so it is the one
+        # that grows and - importantly - the one that gives up space when the
+        # window is made short. With plain packing Tk clips whichever rows were
+        # packed last (the whole status area) instead of shrinking the box.
+        self.root.columnconfigure(0, weight=1)
+        self.root.rowconfigure(1, weight=1)
 
         header = tk.Frame(self.root, bg=BG)
-        header.pack(fill="x", padx=14, pady=(14, 8))
+        header.grid(row=0, column=0, sticky="ew", padx=14, pady=(14, 8))
         tk.Label(
             header, text="Auto Typer", bg=BG, fg=ACCENT_BRIGHT,
             font=("Segoe UI Semibold", 17),
@@ -208,8 +250,9 @@ class AutoTyperApp:
             bg=BG, fg=DIM, font=("Segoe UI", 9),
         ).pack(anchor="w")
 
-        text_frame = tk.Frame(self.root, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
-        text_frame.pack(fill="both", expand=True, padx=14, pady=(0, 8))
+        self.text_frame = tk.Frame(self.root, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
+        text_frame = self.text_frame
+        text_frame.grid(row=1, column=0, sticky="nsew", padx=14, pady=(0, 8))
         self.text = tk.Text(
             text_frame, bg=INPUT, fg=TEXT, insertbackground=ACCENT_BRIGHT,
             selectbackground="#4a4a2a", relief="flat", wrap="word",
@@ -223,7 +266,7 @@ class AutoTyperApp:
         self.text.tag_configure("head", background=ACCENT, foreground="#1a1a1a")
 
         controls = tk.Frame(self.root, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
-        controls.pack(fill="x", padx=14, pady=(0, 8))
+        controls.grid(row=2, column=0, sticky="ew", padx=14, pady=(0, 8))
 
         speed_row = tk.Frame(controls, bg=CARD)
         speed_row.pack(fill="x", padx=10, pady=(10, 4))
@@ -332,7 +375,7 @@ class AutoTyperApp:
         ).pack(side="top", anchor="w")
 
         button_row = tk.Frame(self.root, bg=BG)
-        button_row.pack(fill="x", padx=14, pady=(0, 8))
+        button_row.grid(row=3, column=0, sticky="ew", padx=14, pady=(0, 8))
         self.start_button = tk.Button(
             button_row, text="Start typing (F8)", command=self.toggle,
             bg=ACCENT, fg="#1a1a1a", activebackground=ACCENT_BRIGHT, activeforeground="#1a1a1a",
@@ -359,7 +402,7 @@ class AutoTyperApp:
         self.clear_button.pack(side="right")
 
         status_frame = tk.Frame(self.root, bg=BG)
-        status_frame.pack(fill="x", padx=14, pady=(0, 14))
+        status_frame.grid(row=4, column=0, sticky="ew", padx=14, pady=(0, 14))
         self.status_label = tk.Label(status_frame, text="", bg=BG, fg=TEXT, anchor="w", font=("Segoe UI", 10))
         self.status_label.pack(fill="x")
         self.progress = ttk.Progressbar(
@@ -377,6 +420,23 @@ class AutoTyperApp:
         self.text.bind("<<Paste>>", lambda _e: self._schedule_estimate())
         self.text.bind("<<Cut>>", lambda _e: self._schedule_estimate())
         self.text.bind("<<Modified>>", self._on_text_modified)
+
+    def _fit_minimum_size(self) -> None:
+        """Make the minimum window size match what the layout actually needs.
+
+        Tk clips packed widgets as soon as the window is smaller than their
+        requested size, which is how the long option labels and the whole status
+        area used to disappear. The minimum is measured from the real layout
+        (any font/DPI) instead of being a hard-coded guess; only the text box is
+        allowed to shrink, down to ``TEXT_BOX_MIN_HEIGHT``.
+        """
+        try:
+            self.root.update_idletasks()
+            width = self.root.winfo_reqwidth()
+            fixed_height = self.root.winfo_reqheight() - self.text_frame.winfo_reqheight()
+        except tk.TclError:  # pragma: no cover - only if Tk is half-built
+            return
+        self.root.minsize(max(660, width), max(560, fixed_height + TEXT_BOX_MIN_HEIGHT))
 
     def _apply_settings_to_widgets(self) -> None:
         s = self.settings
@@ -671,6 +731,9 @@ class AutoTyperApp:
         )
         if not self.highlight_ok:
             return
+        # "+ N chars" counts Unicode code points in Tk too, so Python offsets can
+        # be used as they are. (Emoji are two units in an index's *string form*
+        # but one in its arithmetic - tests cover this with an emoji.)
         if absolute - self.shown_upto >= 8 or absolute >= self.plan_total:
             start = f"1.0 + {self.shown_upto} chars"
             end = f"1.0 + {absolute} chars"

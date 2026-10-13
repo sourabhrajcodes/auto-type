@@ -299,8 +299,9 @@ elevated.
 - The **typing plan** (`engine.build_plan`) is a list of timed chunks: character mode gives every
   character a delay derived from 5 characters per word; word mode makes each word a fast burst with
   a pause after it; the "human-like" option multiplies delays by a random 0.6–1.5 and adds longer
-  pauses after `., ; : ! ?` and line breaks. Stopping is polled before every character, so a stop is
-  honoured within one keystroke.
+  pauses after `., ; : ! ?` and line breaks. A stop is polled before every character **and** at
+  least every 20 ms inside a pause, so F8 is honoured within a few tens of milliseconds at any speed
+  - including during the multi-second pauses of the slowest settings.
 - `SendInput` reports how many events it actually inserted; Auto Typer treats a short count as an
   error and tells you why, instead of silently typing into the void.
 - Nothing is sent over the network, no text is stored anywhere except your own `settings.json`, and
@@ -330,7 +331,8 @@ py tests/browser_enter_check.py --case autoindent --indent-fix      # verifies t
 
 What the checks do and what they print:
 
-- **Unit/UI tests** finish with `OK`. They cover the timing plan, stop/resume, the Win32 key events
+- **Unit/UI tests** inject nothing and need no special rights, so they are safe to run at any time.
+  They finish with `OK` and cover the timing plan, stop/resume, the Win32 key events
   (every virtual key, scan code and flag is asserted, no keystroke is injected), settings handling
   and the window's state machine with the window hidden.
 - **`e2e_selfcheck.py`** takes the keyboard focus for about two seconds, types a string containing a
