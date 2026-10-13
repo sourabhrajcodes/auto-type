@@ -5,3 +5,6 @@ settings.json.tmp
 dist/
 build/
 *.spec
+# Chromium diagnostics, in case a browser is ever started from this folder
+cv_debug.log
+msedge_url_fetcher_*/

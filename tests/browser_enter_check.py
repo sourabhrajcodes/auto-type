@@ -310,6 +310,10 @@ def main(argv) -> int:
                 "--window-size=780,600",
                 "--window-position=120,120",
             ],
+            # Chromium drops its own diagnostics (cv_debug.log,
+            # msedge_url_fetcher_*/) into the process working directory; run it in
+            # the throwaway profile so the project folder stays clean.
+            cwd=profile,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
