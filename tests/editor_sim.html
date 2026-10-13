@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Auto Typer - editor simulation</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; padding: 22px; background: #1a1a1a; color: #e0e0e0;
+    font-family: "Segoe UI", system-ui, sans-serif;
+  }
+  h1 { font-size: 17px; color: #f0c040; margin: 0 0 6px; }
+  p { font-size: 13px; color: #888; margin: 0 0 14px; line-height: 1.5; }
+  code { background: #2a2a2a; padding: 2px 6px; border-radius: 4px; color: #e0e0e0; }
+  .editor { position: relative; }
+  textarea {
+    width: 100%; height: 190px; box-sizing: border-box; resize: vertical;
+    background: #2a2a2a; color: #e0e0e0; border: 1px solid #333; border-radius: 6px;
+    font-family: Consolas, monospace; font-size: 14px; padding: 12px; outline: none;
+  }
+  textarea:focus { border-color: #d4a030; }
+  .popup {
+    position: absolute; right: 14px; bottom: 26px; background: #2f5496; color: #fff;
+    font-family: Consolas, monospace; font-size: 13px; border-radius: 4px;
+    padding: 4px 10px; box-shadow: 0 3px 10px rgba(0,0,0,.5);
+  }
+  .popup b { color: #ffe9a8; }
+  .badge {
+    margin-top: 14px; display: inline-block; background: #2a2a2a; color: #888;
+    border: 1px solid #333; border-radius: 6px; padding: 8px 14px;
+    font-size: 14px; font-weight: 600; letter-spacing: .3px;
+  }
+  .badge.pass { background: #1e3a1e; border-color: #2f6b2f; color: #8ce08c; }
+  .badge.fail { background: #3a1e1e; border-color: #6b2f2f; color: #ff9c9c; }
+</style>
+</head>
+<body>
+  <h1>Auto Typer &mdash; editor simulation</h1>
+  <p>
+    This page imitates a web code editor. Its autocomplete popup <b>swallows Enter</b>
+    (the screenshot where the lines ran together), and with <code>?autoindent=1</code> it also
+    copies the current line's indentation onto every new line (the screenshot where the
+    indentation drifted further right with every line).<br>
+    Drive it with: <code>py auto-typer/tests/browser_enter_check.py --case popup|autoindent</code>.<br>
+    The badge turns PASS when the box contains exactly the text the checker typed.
+  </p>
+  <div class="editor">
+    <textarea id="ed" spellcheck="false" autocomplete="off" autocapitalize="off"></textarea>
+    <div id="popup" class="popup" hidden><b>SUGGEST</b> &nbsp;press Enter to accept</div>
+  </div>
+  <div id="badge" class="badge">WAITING</div>
+
+<script>
+  // The checker passes the text it is typing and the editor behaviour to imitate.
+  const params = new URLSearchParams(location.search);
+  const EXPECTED = params.get("expect") || "hello\nworld";
+  const AUTO_INDENT = params.get("autoindent") === "1";
+  const ed = document.getElementById("ed");
+  const popup = document.getElementById("popup");
+  const badge = document.getElementById("badge");
+  let popupOpen = false;
+  let swallowed = 0;
+  let keystrokes = 0; // any keydown the page received at all (diagnostics)
+  let resets = 0;
+  window.addEventListener("keydown", (event) => {
+    keystrokes += 1;
+    if (event.key === "F23") {   // checker's "clear the page" key
+      resets += 1;
+      window.__reset();
+    }
+  }, true);
+
+  function refresh() {
+    if (ed.value === EXPECTED) {
+      badge.textContent = "PASS - the box contains exactly what was typed";
+      badge.className = "badge pass";
+    } else if (ed.value.includes("SUGGEST")) {
+      badge.textContent = "FAIL - Enter was swallowed by the popup " + swallowed + "x";
+      badge.className = "badge fail";
+    } else if (ed.value) {
+      badge.textContent = "FAIL - the box does not match the text that was typed";
+      badge.className = "badge fail";
+    } else {
+      badge.textContent = "WAITING";
+      badge.className = "badge";
+    }
+    report();
+  }
+
+  // Insert like a textarea would: replacing the selection when there is one,
+  // so the checker's "select the indentation, then type over it" works.
+  function insert(text) {
+    ed.setRangeText(text, ed.selectionStart, ed.selectionEnd, "end");
+    ed.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  function currentLineIndent() {
+    const before = ed.value.slice(0, ed.selectionStart);
+    const line = before.slice(before.lastIndexOf("\n") + 1);
+    const match = line.match(/^[ \t]*/);
+    return match ? match[0] : "";
+  }
+
+  ed.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {          // editors close their popup on Escape
+      popupOpen = false; popup.hidden = true; event.preventDefault(); return;
+    }
+    if (event.key !== "Enter") return;
+    if (popupOpen) {                        // popup steals the Enter
+      event.preventDefault();
+      swallowed += 1;
+      insert("SUGGEST");
+      popupOpen = false; popup.hidden = true;
+      refresh();
+      return;
+    }
+    if (AUTO_INDENT) {                      // editors copy the current indentation
+      event.preventDefault();
+      insert("\n" + currentLineIndent());
+      refresh();
+    }
+  });
+
+  ed.addEventListener("input", () => {
+    popupOpen = true; popup.hidden = false;  // aggressive autocomplete
+    refresh();
+  });
+
+  function report() {
+    // When served by browser_enter_check.py this tells the checker what the page
+    // contains; in a plain static preview the POST just 404s and is ignored.
+    fetch("/report", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(window.__state()),
+    }).catch(() => {});
+  }
+
+  window.__reset = () => {
+    ed.value = ""; swallowed = 0; popupOpen = false; popup.hidden = true;
+    ed.focus(); refresh();
+  };
+  window.__state = () => ({
+    value: ed.value,
+    badge: badge.textContent,
+    swallowed,
+    autoIndent: AUTO_INDENT,
+    keysSeen: keystrokes,
+    resets,
+    pageFocused: document.hasFocus(),
+    activeElement: document.activeElement ? document.activeElement.id : "",
+  });
+  window.__focus = () => { ed.focus(); return document.activeElement && document.activeElement.id; };
+
+  // browser_enter_check.py tags each run so it can find exactly this window.
+  const runTag = params.get("run");
+  if (runTag) document.title = "Auto Typer check " + runTag;
+
+  ed.focus();
+  refresh();
+  report();
+  setInterval(report, 700); // heartbeat so the checker can see focus/state live
+</script>
+</body>
+</html>
