@@ -1,6 +1,6 @@
 """Tests for Auto Typer's settings persistence (no GUI is opened).
 
-Run with:  py -m unittest discover -s auto-typer/tests -v
+Run with:  py -m unittest discover -s tests -v
 """
 
 from __future__ import annotations

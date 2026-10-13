@@ -21,7 +21,7 @@ Keystrokes are only sent while the target window is confirmed foreground.
 Exit codes: 0 = outcome matched, 1 = unexpected outcome, 3 = inconclusive,
 4 = skipped (not Windows / no browser found).
 
-Run with:  py auto-typer/tests/browser_enter_check.py --case autoindent --indent-fix
+Run with:  py tests/browser_enter_check.py --case autoindent --indent-fix
 """
 
 from __future__ import annotations

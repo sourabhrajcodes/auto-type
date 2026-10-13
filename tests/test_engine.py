@@ -1,6 +1,6 @@
 """Unit tests for the Auto Typer engine (no real keystrokes are injected).
 
-Run with:  py -m unittest discover -s auto-typer/tests -v
+Run with:  py -m unittest discover -s tests -v
 """
 
 from __future__ import annotations

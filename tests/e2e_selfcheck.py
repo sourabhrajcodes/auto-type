@@ -14,7 +14,7 @@ cannot be secured or is stolen mid-run.
 Exit codes: 0 = passed, 1 = failed, 3 = inconclusive (no focus / session busy),
 4 = skipped (not Windows).
 
-Run with:  py auto-typer/tests/e2e_selfcheck.py
+Run with:  py tests/e2e_selfcheck.py
 """
 
 from __future__ import annotations

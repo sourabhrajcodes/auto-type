@@ -1,7 +1,7 @@
 """UI flow tests for Auto Typer. The window stays hidden (withdrawn) and no
 keystrokes are ever injected - these drive the app's state machine directly.
 
-Run with:  py -m unittest discover -s auto-typer/tests -v
+Run with:  py -m unittest discover -s tests -v
 """
 
 from __future__ import annotations
