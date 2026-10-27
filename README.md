@@ -36,9 +36,9 @@ Windows 10 / 11 · Python standard library only · no account, no internet, no t
 
 ## 1. What is it, and who is it for?
 
-Auto Typer is a small Windows desktop app. You paste (or type) the text you want, pick a speed,
-click **Start**, and click into the window where the text should appear. Auto Typer then types it
-there, character by character, while you do something else.
+Auto Typer is a small desktop app for Windows and Linux. You paste (or type) the text you want,
+pick a speed, click **Start**, and click into the window where the text should appear. Auto Typer
+then types it there, character by character, while you do something else.
 
 Typical uses:
 
@@ -65,7 +65,9 @@ Typical uses:
 - **It cannot type into windows running as administrator** (or into the UAC prompt / lock screen).
   Windows blocks synthetic keystrokes coming from a normal app — that is a security feature, not a
   bug. See [Limitations](#12-limitations-and-responsible-use).
-- It does not work on macOS or Linux (it uses a Windows-only keyboard API).
+- It does not work on macOS.
+- On Linux it needs either an X11 session (or XWayland), or a Wayland compositor with the
+  virtual-keyboard protocol (`wtype`: Sway, Hyprland, KDE). GNOME on Wayland is not supported yet.
 - It cannot make a website accept input that the website itself blocks.
 - It does not read the screen, and it cannot check what actually appeared in the target window.
 
@@ -74,6 +76,10 @@ Typical uses:
 ## 2. Get it running (no programming needed)
 
 You need Windows 10 or 11. Everything below takes about five minutes the first time.
+
+On Linux it is three commands instead: `sudo apt install python3 python3-tk libxtst6` (add
+`wtype` on Sway / Hyprland / KDE), then `python3 auto_typer.pyw`. Settings live in
+`~/.config/auto-typer/settings.json` there, instead of next to the program.
 
 ### Step 1 — Install Python (once)
 
@@ -172,8 +178,13 @@ problem and the fix without touching a real site.
 
 | Key | Where it works | What it does |
 |-----|----------------|--------------|
-| **F8** | Anywhere, globally | Start, stop, cancel the countdown, or resume — same as the big button |
+| **F8** | Windows, and Linux on X11 — anywhere, globally | Start, stop, cancel the countdown, or resume — same as the big button |
 | **Esc** | While the Auto Typer window is focused | Stop typing |
+
+On Wayland no program may watch keys globally, so the shortcut is yours to define: bind
+`./start_auto_typer.sh --toggle` to a key in your desktop's keyboard settings. It sends the running
+app a signal, which is the only mechanism the compositor allows. The app says so on its own window
+when no global key could be set up.
 
 ---
 
@@ -186,7 +197,7 @@ problem and the fix without touching a real site.
 | **Human-like rhythm** | On | Random small delays plus longer stops at punctuation and line ends | Turn it off when you want the estimated time to be exact |
 | **Switch to target after** | 3 s | Countdown before typing starts | Increase if you need time to position a window; set 0 when you are already focused |
 | **Tab = 4 spaces** | On | Tabs in your text are typed as spaces | Keep it on for Python/YAML/code. Turn it off if the target treats Tab as "next field" |
-| **Press Esc before each line break** | Off | Sends Esc, then Enter, for every new line | **Turn on** for any web editor / online IDE whose autocomplete popup accepts Enter as "use this suggestion" and swallows your line breaks |
+| **Press Esc before each line break** | Off | Sends Esc (twice, 20 ms apart), then Enter, for every new line | **Turn on** for any web editor / online IDE whose autocomplete popup accepts Enter as "use this suggestion" and swallows your line breaks |
 | **Clear the editor's auto-indent after each line break** | Off | After every Enter, removes the indentation the editor inserted on the fresh line before typing your own | **Turn on** when the target editor auto-indents and your lines creep further to the right as it types |
 | **Compatibility pacing** | Off | Slows the engine to a floor of 25 ms per key and 120 ms per line break | Turn on when characters go missing or appear out of order in a browser editor |
 | **Minimize while typing** | Off | Hides the app when typing begins | Useful when the target is behind the app's window |
@@ -305,7 +316,8 @@ elevated.
 - `SendInput` reports how many events it actually inserted; Auto Typer treats a short count as an
   error and tells you why, instead of silently typing into the void.
 - Nothing is sent over the network, no text is stored anywhere except your own `settings.json`, and
-  there are no third-party packages — only `tkinter`, `ctypes` and the standard library.
+  there are no third-party packages — only `tkinter`, `ctypes` and the standard library. On Wayland
+  the `wtype` program is used when it is installed; it is a system package, not a Python dependency.
 
 ---
 
@@ -321,13 +333,20 @@ py -m unittest discover -s tests -v
 # 2) End-to-end: real keystrokes into its own focused window, verifies every character
 py tests/e2e_selfcheck.py
 py tests/e2e_selfcheck.py --esc --indent-fix
+py tests/e2e_selfcheck.py --backend --esc --indent-fix   # the path the app actually uses
 
 # 3) Browser check: opens a throwaway Edge/Chrome window and types with real keystrokes
 py tests/browser_enter_check.py --case popup --strategy enter       # reproduces the swallowed Enter
 py tests/browser_enter_check.py --case popup --strategy esc_enter   # verifies the Esc fix
 py tests/browser_enter_check.py --case autoindent                   # reproduces the drifting indentation
 py tests/browser_enter_check.py --case autoindent --indent-fix      # verifies the auto-indent fix
+py tests/browser_enter_check.py --case autoindent --indent-fix --mode word --wpm 100 --text "a\n    b"
 ```
+
+On Linux, run the unit tests with `python3 -m unittest discover -s tests -v`. The two end-to-end
+scripts above stay Windows-only on purpose: they drive Win32 window focus to guarantee they never
+leak keystrokes into another window. The unit tests do run on Linux and cover the key policy and
+the backends' pure parts (keymap decoding, keysyms, `wtype` argument building).
 
 What the checks do and what they print:
 
@@ -338,12 +357,16 @@ What the checks do and what they print:
 - **`e2e_selfcheck.py`** takes the keyboard focus for about two seconds, types a string containing a
   line break and non-ASCII characters into its own window and prints
   `PASS: N characters including 1 line break(s) injected via SendInput and verified`. Add `--esc`
-  and/or `--indent-fix` to exercise the editor options. It refuses to type unless it can confirm its
+  and/or `--indent-fix` to exercise the editor options, and `--backend` to type through
+  `backends.get_keyboard()` + `engine.emit` (the path the app uses) instead of the legacy
+  `WindowsKeyboard.tap_char`. It refuses to type unless it can confirm its
   own window is in front, so it never leaks characters into another window — **do not touch the
   keyboard or mouse while it runs.**
 - **`browser_enter_check.py`** opens its own throwaway browser window (with a temporary profile,
   closed afterwards), types, and prints both the page's content and a verdict such as
-  `BUG REPRODUCED` (the bug being reproduced, exit code 0) or `PASS`.
+  `BUG REPRODUCED` (the bug being reproduced, exit code 0) or `PASS`. Its `Delivery:` line reports
+  how many Escape and Enter keys the page actually received - that is how the dropped-Escape defect
+  was found, and why Escape is now pressed twice before each line break.
 
 Exit codes for the two end-to-end scripts: `0` passed / expected outcome, `1` failed, `3`
 inconclusive (focus unavailable), `4` skipped (not Windows, or no browser found).
@@ -355,7 +378,12 @@ inconclusive (focus unavailable), `4` skipped (not Windows, or no browser found)
 | File | Purpose |
 |------|---------|
 | `auto_typer.pyw` | The app: window, global F8 hotkey, settings, progress |
-| `engine.py` | The typing engine: timing plan and the Win32 `SendInput` keyboard |
+| `engine.py` | The typing engine: timing plan, the key policy (`emit`), and the Win32 `SendInput` transport |
+| `backends/` | Keyboard transports: `win32.py` (SendInput), `x11.py` (XTest), `wayland.py` (`wtype`), `fake.py` (tests) |
+| `hotkeys/` | Global start/stop key: `windows.py` (GetAsyncKeyState), `x11.py` (XQueryKeymap), `signal_toggle.py` (Wayland's SIGUSR1) |
+| `start_auto_typer.sh`, `auto-typer.desktop` | Linux launcher and desktop entry |
+| `tests/test_hotkeys.py` | Hotkey selection, key-bit decoding, pid file and `--toggle` handling |
+| `tests/test_backends.py` | The key policy and every backend's pure parts (runs on any OS) |
 | `start_auto_typer.bat` | Double-click launcher (finds Python, starts without a console window) |
 | `tests/test_engine.py` | Plan timing, stop/resume, Win32 struct layout, key and scan codes |
 | `tests/test_app_settings.py` | Settings load/save/sanitising |
@@ -407,9 +435,10 @@ for that reason. Use this where it is allowed (see below).
 **Can I run several copies?**
 Yes, but only one should be typing at a time — they all send keystrokes to the focused window.
 
-**Why is it Windows-only?**
-It uses the Windows `SendInput` API. macOS and Linux have similar APIs, but this project has not
-implemented them.
+**Which systems does it support?**
+Windows 10/11 uses the `SendInput` API. On Linux it types through XTest on X11 (and on XWayland
+windows), or through `wtype` on Wayland compositors that implement the virtual-keyboard protocol.
+macOS is not supported.
 
 ---
 
@@ -417,7 +446,10 @@ implemented them.
 
 **Limitations**
 
-- Windows 10/11 only.
+- Windows 10/11, or Linux with X11 / XWayland / `wtype` (GNOME on Wayland is not supported).
+- On Wayland the global F8 shortcut has to be bound by you (`--toggle`); only X11 gets it built in.
+- The Linux backends have unit tests on every OS but were not exercised on a Linux desktop in
+  this repository's checks; treat them as newer than the Windows path.
 - Cannot type into elevated windows, the UAC prompt or the lock screen.
 - High speeds (200+ wpm) are approximate: Windows timer granularity is around 15 ms.
 - If the target application binds single letters to shortcuts, those shortcuts still fire.

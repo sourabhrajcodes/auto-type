@@ -62,8 +62,37 @@
   let swallowed = 0;
   let keystrokes = 0; // any keydown the page received at all (diagnostics)
   let resets = 0;
+  // Exact delivery counts. The debug trace below is capped (oldest entries are
+  // dropped), so it can never prove a key never arrived - these counters can.
+  const keyCounts = { esc: 0, enter: 0, escPairs: 0, other: 0 };
+  let lastKeyWasEscape = false;
+  // Debug trace: every keydown (wherever it landed) with the state BEFORE the
+  // key's default action, plus every edit afterwards - so a failure can be
+  // replayed to the exact keystroke that changed the text.
+  const trace = [];
+  function note(kind, extra) {
+    trace.push(Object.assign({
+      k: kind,
+      t: (document.activeElement && document.activeElement.id) || "body",
+      ss: ed.selectionStart,
+      v: ed.value,
+    }, extra || {}));
+    if (trace.length > 600) trace.shift();
+  }
+  window.addEventListener("keydown", (event) => {
+    note(event.key, { tgt: (event.target && event.target.id) || event.target.tagName });
+  }, true);
   window.addEventListener("keydown", (event) => {
     keystrokes += 1;
+    if (event.key === "Escape") {
+      keyCounts.esc += 1;
+    } else if (event.key === "Enter") {
+      keyCounts.enter += 1;
+      if (lastKeyWasEscape) keyCounts.escPairs += 1;  // an Escape directly before it
+    } else {
+      keyCounts.other += 1;
+    }
+    lastKeyWasEscape = event.key === "Escape";
     if (event.key === "F23") {   // checker's "clear the page" key
       resets += 1;
       window.__reset();
@@ -123,6 +152,7 @@
 
   ed.addEventListener("input", () => {
     popupOpen = true; popup.hidden = false;  // aggressive autocomplete
+    note("=input", { ss: ed.selectionStart });
     refresh();
   });
 
@@ -138,6 +168,8 @@
 
   window.__reset = () => {
     ed.value = ""; swallowed = 0; popupOpen = false; popup.hidden = true;
+    keyCounts.esc = 0; keyCounts.enter = 0; keyCounts.escPairs = 0; keyCounts.other = 0;
+    lastKeyWasEscape = false;
     ed.focus(); refresh();
   };
   window.__state = () => ({
@@ -146,7 +178,9 @@
     swallowed,
     autoIndent: AUTO_INDENT,
     keysSeen: keystrokes,
+    keyCounts,
     resets,
+    trace,
     pageFocused: document.hasFocus(),
     activeElement: document.activeElement ? document.activeElement.id : "",
   });

@@ -2,8 +2,9 @@
 """Auto Typer - paste text, press F8, and it types it out for you.
 
 Steady character-by-character or word-by-word bursts, with an optional
-human-like rhythm. Keystrokes are sent with the Win32 SendInput API, so they
-land in whatever window has focus (editor, browser, form, chat...).
+human-like rhythm. Keystrokes go through the platform backend in ``backends/``
+(Win32 SendInput, or XTest/wtype on Linux), so they land in whatever window has
+focus (editor, browser, form, chat...).
 
 Run it by double-clicking this file or ``start_auto_typer.bat`` (both start it
 without a console window), or from a terminal with ``pyw auto_typer.pyw``.
@@ -25,8 +26,24 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, APP_DIR)
 
 import engine  # noqa: E402  (after sys.path fix-up)
+import backends  # noqa: E402
+import hotkeys  # noqa: E402
+from hotkeys import signal_toggle  # noqa: E402
+# Re-exported for the tests, which check the Win32 key-state wrapper directly.
+from hotkeys.windows import HotkeyWatcher, key_state_getter  # noqa: E402,F401
 
-SETTINGS_FILE = os.path.join(APP_DIR, "settings.json")
+
+def settings_file_for(app_dir: str) -> str:
+    """Settings next to the program on Windows (as before), XDG on Linux."""
+    if sys.platform == "win32":
+        return os.path.join(app_dir, "settings.json")
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
+        os.path.expanduser("~"), ".config"
+    )
+    return os.path.join(base, "auto-typer", "settings.json")
+
+
+SETTINGS_FILE = settings_file_for(APP_DIR)
 
 # Palette borrowed from the College Countdown app so the two feel related.
 BG = "#1a1a1a"
@@ -92,17 +109,6 @@ def as_bool(value, default: bool = False) -> bool:
     return default
 
 
-def key_state_getter(ctypes_module):
-    """``GetAsyncKeyState`` wrapper, or ``None`` where Win32 user32 is missing."""
-    windll = getattr(ctypes_module, "windll", None)
-    if windll is None:  # not Windows: the hotkey watcher simply never fires
-        return None
-    get_state = windll.user32.GetAsyncKeyState
-    get_state.argtypes = (ctypes_module.c_int,)
-    get_state.restype = ctypes_module.c_short
-    return get_state
-
-
 def load_settings() -> dict:
     data = dict(DEFAULTS)
     try:
@@ -140,40 +146,13 @@ def save_settings(data: dict) -> None:
     """Atomic write, same style as the app's JSON storage layer."""
     tmp = SETTINGS_FILE + ".tmp"
     try:
+        if os.path.dirname(SETTINGS_FILE):
+            os.makedirs(os.path.dirname(SETTINGS_FILE), exist_ok=True)
         with open(tmp, "w", encoding="utf-8") as handle:
             json.dump(data, handle, ensure_ascii=False, indent=2)
         os.replace(tmp, SETTINGS_FILE)
     except OSError:
         pass
-
-
-class HotkeyWatcher(threading.Thread):
-    """Watches a single key globally with GetAsyncKeyState (no focus needed)."""
-
-    def __init__(self, vk: int, on_press):
-        super().__init__(daemon=True)
-        import ctypes
-
-        self._get_state = key_state_getter(ctypes)
-        self._vk = vk
-        self._on_press = on_press
-        self._stop = threading.Event()
-
-    def stop(self) -> None:
-        self._stop.set()
-
-    def run(self) -> None:
-        if self._get_state is None:  # no Win32 keyboard state to watch
-            return
-        was_down = False
-        while not self._stop.wait(HOTKEY_POLL_SECONDS):
-            is_down = bool(self._get_state(self._vk) & 0x8000)
-            if is_down and not was_down:
-                try:
-                    self._on_press()
-                except Exception:
-                    pass
-            was_down = is_down
 
 
 class AutoTyperApp:
@@ -184,7 +163,14 @@ class AutoTyperApp:
 
         self.events: "queue.Queue[tuple]" = queue.Queue()
         self.stop_event = threading.Event()
-        self.hotkey = HotkeyWatcher(VK_F8, lambda: self.events.put(("hotkey", 0, None)))
+        self.hotkey = hotkeys.make_hotkey(
+            lambda: self.events.put(("hotkey", 0, None)), poll=HOTKEY_POLL_SECONDS
+        )
+        self.hotkey_warning = getattr(self.hotkey, "warning", "")
+        # Wayland has no global shortcut API: the app listens for SIGUSR1, and
+        # the user binds `start_auto_typer.sh --toggle` in their own settings.
+        if signal_toggle.install(lambda: self.events.put(("hotkey", 0, None))):
+            signal_toggle.write_pid()
         self._destroyed = False
         self._poll_job = None
 
@@ -410,11 +396,18 @@ class AutoTyperApp:
             orient="horizontal", mode="determinate", maximum=100,
         )
         self.progress.pack(fill="x", pady=(4, 2))
-        tk.Label(
-            status_frame,
-            text="F8 = start / stop  ·  Esc = stop  ·  tip: press Start with this window focused to watch it type into the box itself.",
+        hint = (
+            "F8 = start / stop  ·  Esc = stop  ·  tip: press Start with this window "
+            "focused to watch it type into the box itself."
+        )
+        warning = getattr(self, "hotkey_warning", "")
+        if warning:
+            hint = "%s  ·  %s" % (warning, hint)
+        self.hint_label = tk.Label(
+            status_frame, text=hint,
             bg=BG, fg=MUTED, anchor="w", font=("Segoe UI", 8),
-        ).pack(fill="x")
+        )
+        self.hint_label.pack(fill="x")
 
         self.text.bind("<KeyRelease>", lambda _e: self._schedule_estimate())
         self.text.bind("<<Paste>>", lambda _e: self._schedule_estimate())
@@ -475,19 +468,12 @@ class AutoTyperApp:
             "min_newline_pause": engine.COMPAT_NEWLINE_PAUSE if pacing else 0.0,
         }
 
-    def newline_strategy(self) -> str:
-        return (
-            engine.NEWLINE_ESC_ENTER
-            if self.esc_enter_var.get()
-            else engine.NEWLINE_ENTER
+    def emit_options(self) -> engine.EmitOptions:
+        """Which keys each character becomes, straight from the checkboxes."""
+        return engine.EmitOptions(
+            esc_before_enter=bool(self.esc_enter_var.get()),
+            clear_autoindent=bool(self.indent_fix_var.get()),
         )
-
-    def keyboard_options(self) -> dict:
-        """The engine's keyboard settings, straight from the checkboxes."""
-        return {
-            "newline_strategy": self.newline_strategy(),
-            "auto_indent_fix": bool(self.indent_fix_var.get()),
-        }
 
     def _normalized_text(self) -> str:
         return engine.normalize_text(
@@ -668,21 +654,29 @@ class AutoTyperApp:
             except tk.TclError:
                 pass
         threading.Thread(
-            target=self._worker, args=(plan, self.keyboard_options()), daemon=True
+            target=self._worker, args=(plan, self.emit_options()), daemon=True
         ).start()
 
-    def _worker(self, plan, keyboard_options: dict) -> None:
+    def _worker(self, plan, options) -> None:
+        keyboard = None
         try:
-            keyboard = engine.WindowsKeyboard(**keyboard_options)
+            keyboard = backends.get_keyboard()
             typed = engine.run_plan(
                 keyboard,
                 plan,
                 should_stop=self.stop_event.is_set,
                 on_char=lambda n: self.events.put(("progress", n, None)),
+                options=options,
             )
             self.events.put(("done", typed, None))
-        except Exception as exc:  # injection blocked, API missing, ...
+        except Exception as exc:  # injection blocked, no backend, ...
             self.events.put(("error", 0, str(exc)))
+        finally:
+            if keyboard is not None:
+                try:
+                    keyboard.close()
+                except Exception:
+                    pass
 
     def request_stop(self) -> None:
         if self.state == "counting":
@@ -767,6 +761,7 @@ class AutoTyperApp:
         self._destroyed = True
         self.stop_event.set()
         self.hotkey.stop()
+        signal_toggle.clear_pid()
         for job in (self._poll_job, self._estimate_job, self._countdown_job):
             if job is not None:
                 try:
@@ -842,9 +837,20 @@ class AutoTyperApp:
 
 
 def main(argv: list[str]) -> int:
-    if os.name != "nt":
-        print("Auto Typer currently supports Windows only (it types with SendInput).")
+    if "--toggle" in argv:
+        # Used as a desktop shortcut on Wayland, where no global key exists.
+        if signal_toggle.send_toggle():
+            return 0
+        print(
+            "Auto Typer is not running (no pid file), so there is nothing to toggle."
+        )
         return 1
+    try:  # say why up front instead of failing when the first key is sent
+        probe = backends.get_keyboard()
+    except backends.KeyboardError as exc:
+        print("Auto Typer cannot type here: %s" % (exc,))
+        return 1
+    probe.close()
     settings = load_settings()
     root = tk.Tk()
     app = AutoTyperApp(root, settings, save_on_close="--selftest-ui" not in argv)

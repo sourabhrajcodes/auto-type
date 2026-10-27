@@ -219,10 +219,8 @@ class UiFlowTests(unittest.TestCase):
         self.assertFalse(app.esc_enter_var.get())
         self.assertFalse(app.pacing_var.get())
         self.assertFalse(app.indent_fix_var.get())
-        self.assertEqual(app.newline_strategy(), engine_module.NEWLINE_ENTER)
         self.assertEqual(
-            app.keyboard_options(),
-            {"newline_strategy": engine_module.NEWLINE_ENTER, "auto_indent_fix": False},
+            app.emit_options(), engine_module.EmitOptions(False, False)
         )
         self.assertEqual(app._params()["min_gap"], 0.0)
         self.assertEqual(app._params()["min_newline_pause"], 0.0)
@@ -230,11 +228,7 @@ class UiFlowTests(unittest.TestCase):
         app.esc_enter_var.set(True)
         app.pacing_var.set(True)
         app.indent_fix_var.set(True)
-        self.assertEqual(app.newline_strategy(), engine_module.NEWLINE_ESC_ENTER)
-        self.assertEqual(
-            app.keyboard_options(),
-            {"newline_strategy": engine_module.NEWLINE_ESC_ENTER, "auto_indent_fix": True},
-        )
+        self.assertEqual(app.emit_options(), engine_module.EmitOptions(True, True))
         self.assertEqual(app._params()["min_gap"], engine_module.COMPAT_MIN_GAP)
         self.assertEqual(
             app._params()["min_newline_pause"], engine_module.COMPAT_NEWLINE_PAUSE
@@ -260,15 +254,7 @@ class UiFlowTests(unittest.TestCase):
                 time.sleep(0.01)
         finally:
             app._worker = original
-        self.assertEqual(
-            seen,
-            [
-                {
-                    "newline_strategy": engine_module.NEWLINE_ESC_ENTER,
-                    "auto_indent_fix": True,
-                }
-            ],
-        )
+        self.assertEqual(seen, [engine_module.EmitOptions(True, True)])
 
     def test_pacing_floors_only_bite_at_high_speeds(self):
         app = make_app(self)

@@ -14,7 +14,10 @@ cannot be secured or is stolen mid-run.
 Exit codes: 0 = passed, 1 = failed, 3 = inconclusive (no focus / session busy),
 4 = skipped (not Windows).
 
-Run with:  py tests/e2e_selfcheck.py
+``--backend`` types through ``backends.get_keyboard()`` + ``engine.emit`` (the
+path the app uses), instead of the Windows-only ``WindowsKeyboard.tap_char``.
+
+Run with:  py tests/e2e_selfcheck.py [--esc] [--indent-fix] [--backend]
 """
 
 from __future__ import annotations
@@ -33,6 +36,7 @@ import tkinter as tk  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import engine  # noqa: E402
+import backends  # noqa: E402
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -120,9 +124,18 @@ def main() -> int:
         f"(line breaks: {strategy}"
         f"{' + auto-indent fix' if indent_fix else ''})..."
     )
-    keyboard = engine.WindowsKeyboard(
-        newline_strategy=strategy, auto_indent_fix=indent_fix
-    )
+    use_backend = "--backend" in sys.argv
+    if use_backend:
+        keyboard = backends.get_keyboard()
+        options = engine.EmitOptions(
+            esc_before_enter=strategy == engine.NEWLINE_ESC_ENTER,
+            clear_autoindent=indent_fix,
+        )
+    else:
+        keyboard = engine.WindowsKeyboard(
+            newline_strategy=strategy, auto_indent_fix=indent_fix
+        )
+        options = None
     plan = engine.build_plan(TEXT, wpm=engine.MAX_WPM, mode="char", human=False)
     typed = 0
     lost_focus = False
@@ -130,7 +143,10 @@ def main() -> int:
         if not owns_foreground(hwnd):
             lost_focus = True
             break
-        keyboard.tap_char(stroke.text)
+        if options is None:
+            keyboard.tap_char(stroke.text)
+        else:
+            engine.emit(keyboard, stroke.text, options)
         typed += 1
         time.sleep(stroke.post_delay)
 

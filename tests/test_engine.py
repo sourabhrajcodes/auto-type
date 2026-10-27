@@ -334,12 +334,18 @@ class Win32InjectionTests(unittest.TestCase):
             batches.append(events)
             return len(events)
 
-        keyboard = engine.WindowsKeyboard(send=send, newline_strategy=engine.NEWLINE_ESC_ENTER)
+        keyboard = engine.WindowsKeyboard(
+            send=send, newline_strategy=engine.NEWLINE_ESC_ENTER, escape_settle=0
+        )
         keyboard.tap_char("\n")
-        self.assertEqual(len(batches), 2)
+        # Escape is pressed twice (a single injected one is occasionally dropped
+        # inside the browser), then the Enter follows.
+        self.assertEqual(len(batches), 3)
         self.assertEqual(batches[0][0].u.ki.wVk, engine.VK_ESCAPE)
         self.assertEqual(batches[0][0].u.ki.wScan, engine.SCAN_ESCAPE)
-        self.assertEqual(batches[1][0].u.ki.wVk, engine.VK_RETURN)
+        self.assertEqual(batches[1][0].u.ki.wVk, engine.VK_ESCAPE)
+        self.assertEqual(batches[2][0].u.ki.wVk, engine.VK_RETURN)
+        self.assertEqual(batches[2][0].u.ki.wScan, engine.SCAN_RETURN)
 
     def test_plain_enter_strategy_sends_no_escape(self):
         batches, keyboard = self.collector()
@@ -421,12 +427,13 @@ class Win32InjectionTests(unittest.TestCase):
             send=lambda events: (batches.append(events), len(events))[1],
             newline_strategy=engine.NEWLINE_ESC_ENTER,
             auto_indent_fix=True,
+            escape_settle=0,
         )
         keyboard.tap_char("\n")
         kinds = [batch[0].u.ki.wVk for batch in batches]
-        self.assertEqual(kinds[0], engine.VK_ESCAPE)
-        self.assertEqual(kinds[1], engine.VK_RETURN)
-        self.assertEqual(kinds[2:4], [engine.VK_HOME, engine.VK_HOME])
+        self.assertEqual(kinds[0:2], [engine.VK_ESCAPE, engine.VK_ESCAPE])
+        self.assertEqual(kinds[2], engine.VK_RETURN)
+        self.assertEqual(kinds[3:5], [engine.VK_HOME, engine.VK_HOME])
 
     def test_auto_indent_fix_leaves_ordinary_characters_alone(self):
         batches = []

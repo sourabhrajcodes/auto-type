@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Auto Typer
+Comment=Type pasted text into any window at a chosen speed
+Exec=sh -c 'cd "$(dirname "$1")" && ./start_auto_typer.sh' _ %k
+Icon=utilities-terminal
+Terminal=false
+Categories=Utility;

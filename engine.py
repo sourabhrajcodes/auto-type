@@ -36,7 +36,11 @@ __all__ = [
     "NEWLINE_ESC_ENTER",
     "COMPAT_MIN_GAP",
     "COMPAT_NEWLINE_PAUSE",
+    "ESCAPE_ATTEMPTS",
+    "ESCAPE_SETTLE",
     "STOP_POLL_SLICE",
+    "EmitOptions",
+    "emit",
 ]
 
 IS_WINDOWS = os.name == "nt"
@@ -59,6 +63,21 @@ COMPAT_MIN_GAP = 0.025
 start dropping or reordering input when keystrokes arrive faster than that)."""
 COMPAT_NEWLINE_PAUSE = 0.12
 """Breathing room after each line break when compatibility pacing is on."""
+
+ESCAPE_ATTEMPTS = 2
+"""How often Escape is pressed before each line break (see ``ESCAPE_SETTLE``)."""
+
+ESCAPE_SETTLE = 0.02
+"""Settle time after each Escape on the way to a line break (seconds).
+
+Chromium occasionally swallows an injected Escape that lands in the same instant
+as the next key. Measured against the browser check at 100 wpm: 1 of 49 Escapes
+was lost, and the editor's autocomplete then ate that line's Enter - the exact
+"lines run together / indentation drifts" symptom this option exists to fix.
+Escapes spaced by this gap were delivered 98 of 98 in the same test, so the key
+is pressed twice with a pause between (closing an already closed popup costs
+nothing) before the Enter follows.
+"""
 
 STOP_POLL_SLICE = 0.02
 """Longest a stop request can wait while the engine is pausing (seconds)."""
@@ -177,6 +196,54 @@ def trim_plan(plan: Sequence[Stroke], skip: int) -> List[Stroke]:
     return trimmed
 
 
+@dataclass(frozen=True)
+class EmitOptions:
+    """How each character becomes keys - the same on every operating system.
+
+    ``esc_before_enter`` closes autocomplete popups that would otherwise eat the
+    line break; ``clear_autoindent`` removes the indentation an editor inserts
+    after Enter so the pasted indentation is the only one left.
+    """
+
+    esc_before_enter: bool = False
+    clear_autoindent: bool = False
+
+
+def emit(
+    keyboard,
+    ch: str,
+    options: Optional[EmitOptions] = None,
+    sleep: Callable[[float], None] = time.sleep,
+    settle: float = ESCAPE_SETTLE,
+) -> None:
+    """Send one character to a ``backends.base.Keyboard``-style object.
+
+    Pure policy: it decides *which* keys a character becomes, never how they
+    travel. Every platform therefore shares one copy of the auto-indent fix.
+    """
+    options = options or EmitOptions()
+    if ch in ("\n", "\r"):
+        if options.esc_before_enter:
+            for _ in range(ESCAPE_ATTEMPTS):
+                keyboard.key("esc")
+                if settle > 0:
+                    sleep(settle)
+        keyboard.key("enter")
+        if options.clear_autoindent:
+            # Home twice = column 0 in both plain and "smart home" editors;
+            # Shift+End selects whatever the editor inserted; the space keeps the
+            # Backspace safe so two lines can never merge.
+            keyboard.key("home")
+            keyboard.key("home")
+            keyboard.key("end", ("shift",))
+            keyboard.type_char(" ")
+            keyboard.key("backspace")
+    elif ch == "\t":
+        keyboard.key("tab")
+    else:
+        keyboard.type_char(ch)
+
+
 def wait_interruptibly(
     sleep: Callable[[float], None],
     seconds: float,
@@ -211,6 +278,7 @@ def run_plan(
     should_stop: Optional[Callable[[], bool]] = None,
     on_char: Optional[Callable[[int], None]] = None,
     sleep: Callable[[float], None] = time.sleep,
+    options: Optional[EmitOptions] = None,
 ) -> int:
     """Type the plan. Returns how many characters were actually typed.
 
@@ -225,7 +293,10 @@ def run_plan(
         for index, ch in enumerate(stroke.text):
             if should_stop is not None and should_stop():
                 return typed
-            keyboard.tap_char(ch)
+            if options is None:
+                keyboard.tap_char(ch)  # the Windows-only path, kept for the tests
+            else:
+                emit(keyboard, ch, options, sleep=sleep)
             typed += 1
             if on_char is not None:
                 on_char(typed)
@@ -269,6 +340,18 @@ KEYEVENTF_EXTENDEDKEY = 0x0001
 KEYEVENTF_KEYUP = 0x0002
 KEYEVENTF_UNICODE = 0x0004
 INPUT_KEYBOARD = 1
+
+# Named key -> (virtual key, hardware scan code, extended-key flag).
+# ``space`` is typed as a character instead; it has no mapping here.
+NAMED_KEYS = {
+    "enter": (VK_RETURN, SCAN_RETURN, False),
+    "tab": (VK_TAB, SCAN_TAB, False),
+    "esc": (VK_ESCAPE, SCAN_ESCAPE, False),
+    "home": (VK_HOME, SCAN_HOME, True),
+    "end": (VK_END, SCAN_END, True),
+    "backspace": (VK_BACKSPACE, SCAN_BACKSPACE, False),
+}
+NAMED_MODS = {"shift": (VK_LSHIFT, SCAN_LSHIFT)}
 
 NEWLINE_ENTER = "enter"
 NEWLINE_ESC_ENTER = "esc_enter"
@@ -375,11 +458,12 @@ class WindowsKeyboard:
         send: Optional[Callable[[Sequence["INPUT"]], int]] = None,
         newline_strategy: str = NEWLINE_ENTER,
         auto_indent_fix: bool = False,
+        escape_settle: float = ESCAPE_SETTLE,
     ):
         if send is None and not IS_WINDOWS:
             raise RuntimeError(
-                "Auto Typer currently supports Windows only "
-                "(it types with the Win32 SendInput API)."
+                "The Win32 SendInput keyboard is Windows only; use "
+                "backends.get_keyboard() to pick a keyboard for this system."
             )
         if newline_strategy not in NEWLINE_STRATEGIES:
             raise ValueError(
@@ -389,6 +473,7 @@ class WindowsKeyboard:
         self._send = send if send is not None else send_input_events
         self.newline_strategy = newline_strategy
         self.auto_indent_fix = bool(auto_indent_fix)
+        self.escape_settle = max(0.0, float(escape_settle))
 
     def _tap(self, w_vk: int, w_scan: int, flags: int, extended: bool = False) -> None:
         if extended:
@@ -400,47 +485,50 @@ class WindowsKeyboard:
             ]
         )
 
-    def clear_auto_indent(self) -> None:
-        """Leave a freshly created, still-empty line with no indentation at all.
-
-        Code editors auto-indent after Enter - typically by copying the previous
-        line's leading whitespace. Whatever we type next lands *after* that, so
-        each line drifts further right (the reported bug). There is no way to ask
-        the editor how much it inserted, so the line is normalised instead:
-
-        1. ``Home`` twice - column 0 in both plain and "smart home" editors.
-        2. ``Shift+End`` - selects exactly the indentation the editor inserted.
-        3. Type a space, then ``Backspace`` - replaces that selection (or inserts
-           and deletes a single space when there was nothing to select, so an
-           empty selection can never merge two lines), leaving an empty line.
-        """
-        self._tap(VK_HOME, SCAN_HOME, 0, extended=True)
-        self._tap(VK_HOME, SCAN_HOME, 0, extended=True)
-        self._send(
-            [
-                _key_event(VK_LSHIFT, SCAN_LSHIFT, 0),
-                _key_event(VK_END, SCAN_END, KEYEVENTF_EXTENDEDKEY),
-                _key_event(VK_END, SCAN_END, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP),
-                _key_event(VK_LSHIFT, SCAN_LSHIFT, KEYEVENTF_KEYUP),
-            ]
+    def key(self, name: str, mods: tuple = ()) -> None:
+        """Press and release a named key, with modifiers (see ``NAMED_KEYS``)."""
+        if name == "space":
+            self.type_char(" ")
+            return
+        if name not in NAMED_KEYS:
+            raise ValueError(f"unknown key name {name!r}")
+        unknown = [m for m in mods if m not in NAMED_MODS]
+        if unknown:
+            raise ValueError(f"unknown modifier(s) {unknown!r}")
+        w_vk, w_scan, extended = NAMED_KEYS[name]
+        if not mods:
+            self._tap(w_vk, w_scan, 0, extended=extended)
+            return
+        # One SendInput batch, like a real chord: hold the modifiers, tap, release.
+        base = KEYEVENTF_EXTENDEDKEY if extended else 0
+        events = [_key_event(*NAMED_MODS[m], 0) for m in mods]
+        events.append(_key_event(w_vk, w_scan, base))
+        events.append(_key_event(w_vk, w_scan, base | KEYEVENTF_KEYUP))
+        events.extend(
+            _key_event(*NAMED_MODS[m], KEYEVENTF_KEYUP) for m in reversed(mods)
         )
-        self.tap_char(" ")
-        self._tap(VK_BACKSPACE, SCAN_BACKSPACE, 0)
+        self._send(events)
+
+    def type_char(self, ch: str) -> None:
+        """Type one character as its UTF-16 unit(s)."""
+        for unit in _unicode_units(ch):
+            self._tap(0, unit, KEYEVENTF_UNICODE)
 
     def tap_char(self, ch: str) -> None:
-        if ch in ("\n", "\r"):
-            if self.newline_strategy == NEWLINE_ESC_ENTER:
-                # Close autocomplete / suggestion popups that would otherwise
-                # swallow the Enter and insert a completion instead of a newline.
-                self._tap(VK_ESCAPE, SCAN_ESCAPE, 0)
-            self._tap(VK_RETURN, SCAN_RETURN, 0)
-            if self.auto_indent_fix:
-                self.clear_auto_indent()
-        elif ch == "\t":
-            self._tap(VK_TAB, SCAN_TAB, 0)
-        else:
-            for unit in _unicode_units(ch):
-                self._tap(0, unit, KEYEVENTF_UNICODE)
+        """Type one character using this class's saved newline/indent options.
+
+        The policy lives in ``emit``; this only remembers the constructor
+        arguments, so the legacy entry point and the app cannot drift apart.
+        """
+        emit(
+            self,
+            ch,
+            EmitOptions(
+                esc_before_enter=self.newline_strategy == NEWLINE_ESC_ENTER,
+                clear_autoindent=self.auto_indent_fix,
+            ),
+            settle=self.escape_settle,
+        )
 
     def type_text(self, text: str) -> None:
         for ch in text:

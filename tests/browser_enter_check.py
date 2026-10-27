@@ -21,6 +21,9 @@ Keystrokes are only sent while the target window is confirmed foreground.
 Exit codes: 0 = outcome matched, 1 = unexpected outcome, 3 = inconclusive,
 4 = skipped (not Windows / no browser found).
 
+Keystrokes go through the same backend + ``engine.emit`` path the app uses
+(pass ``--legacy`` to drive the old ``tap_char`` path instead).
+
 Run with:  py tests/browser_enter_check.py --case autoindent --indent-fix
 """
 
@@ -47,6 +50,7 @@ if os.name != "nt":
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import engine  # noqa: E402
+import backends  # noqa: E402
 
 PAGE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "editor_sim.html")
 
@@ -274,6 +278,19 @@ def main(argv) -> int:
         help="turn on the 'clear the editor's auto-indent' option",
     )
     parser.add_argument("--wpm", type=float, default=60.0)
+    parser.add_argument(
+        "--legacy",
+        action="store_true",
+        help="type through the old WindowsKeyboard.tap_char path instead of "
+        "the backends + engine.emit path the app now uses",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=("char", "word"),
+        default="char",
+        help="typing style: char = character by character (default here), "
+        "word = the app's default word-by-word bursts",
+    )
     parser.add_argument("--browser", default=None, help="path to msedge.exe / chrome.exe")
     parser.add_argument("--timeout", type=float, default=45.0, help="browser startup timeout")
     args = parser.parse_args(argv)
@@ -337,14 +354,25 @@ def main(argv) -> int:
             f"Typing {text!r} with line breaks: {args.strategy}"
             f"{' + auto-indent fix' if args.indent_fix else ''}"
         )
-        keyboard = engine.WindowsKeyboard(
-            newline_strategy=args.strategy, auto_indent_fix=args.indent_fix
-        )
-        plan = engine.build_plan(text, wpm=args.wpm, mode="char", human=False)
+        if args.legacy:
+            keyboard = engine.WindowsKeyboard(
+                newline_strategy=args.strategy, auto_indent_fix=args.indent_fix
+            )
+            emit_options = None
+        else:
+            # The path the app itself uses: backend transport, engine policy.
+            keyboard = backends.get_keyboard()
+            emit_options = engine.EmitOptions(
+                esc_before_enter=args.strategy == engine.NEWLINE_ESC_ENTER,
+                clear_autoindent=args.indent_fix,
+            )
+        # F23/F24 are diagnostics keys, not typed text: send them raw.
+        probe = engine.WindowsKeyboard()
+        plan = engine.build_plan(text, wpm=args.wpm, mode=args.mode, human=False)
 
         def clear_page() -> None:
             for _ in range(3):  # F23 makes the page wipe itself over the same key channel
-                keyboard._tap(VK_F23, 0, 0)
+                probe._tap(VK_F23, 0, 0)
                 time.sleep(0.12)
             time.sleep(0.35)
 
@@ -362,7 +390,11 @@ def main(argv) -> int:
                     )
 
             engine.run_plan(
-                keyboard, plan, on_char=watch, should_stop=lambda: bool(interruption)
+                keyboard,
+                plan,
+                on_char=watch,
+                should_stop=lambda: bool(interruption),
+                options=emit_options,
             )
             return interruption[0] if interruption else None
 
@@ -400,6 +432,40 @@ def main(argv) -> int:
             f"Diagnostics:  {keys} key press(es) reached the page, "
             f"focused={LATEST.get('pageFocused')}, activeElement={LATEST.get('activeElement')!r}"
         )
+        counts = LATEST.get("keyCounts") or {}
+        if counts:
+            newlines = text.count("\n")
+            escapes_expected = (
+                newlines * engine.ESCAPE_ATTEMPTS
+                if args.strategy == engine.NEWLINE_ESC_ENTER
+                else 0
+            )
+            pairs_expected = (
+                newlines if args.strategy == engine.NEWLINE_ESC_ENTER else 0
+            )
+            print(
+                f"Delivery:     Escape={counts.get('esc')} Enter={counts.get('enter')} "
+                f"Esc-then-Enter pairs={counts.get('escPairs')} "
+                f"(expected Escape={escapes_expected}, Enter={newlines}, "
+                f"pairs={pairs_expected})"
+            )
+            if args.strategy == engine.NEWLINE_ESC_ENTER and (
+                counts.get("escPairs") != pairs_expected
+                or counts.get("enter") != newlines
+            ):
+                print(
+                    "NOTE: the browser did not receive every line-break key - "
+                    "counts above are the evidence, not the page result alone."
+                )
+        if value != text and LATEST.get("trace"):
+            # Replay evidence: every keydown with the caret and text it saw.
+            trace_path = os.path.join(tempfile.gettempdir(), "autotyper_browser_trace.json")
+            with open(trace_path, "w", encoding="utf-8") as fh:
+                json.dump(LATEST["trace"], fh, ensure_ascii=False)
+            print(
+                f"Trace saved ({len(LATEST['trace'])} events, "
+                f"swallowed={LATEST.get('swallowed')!r}): {trace_path}"
+            )
         if keys <= keys_before:
             print("INCONCLUSIVE: no keystrokes reached the page (focus problem), nothing to judge.")
             return 3
@@ -433,6 +499,10 @@ def main(argv) -> int:
         print("FAIL: plain Enter produced unexpected output (see content above).")
         return 1
     finally:
+        try:
+            keyboard.close()
+        except Exception:  # not built yet, or close failed: cleanup only
+            pass
         for pid in sorted(kill_pids):
             if pid > 0:
                 subprocess.run(
